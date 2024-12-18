@@ -5,6 +5,8 @@ import os
 import requests
 from binance.client import Client as bn
 import ccxt
+import asyncio
+from aiohttp import ClientSession
 
 
 def get_cryptos():
@@ -39,17 +41,29 @@ def get_cryptos():
         return 1
 
 
-def get_price(asset):
+# Spot price for one asset
+async def get_price(asset, session):
     try:
         url = f"https://api.coinbase.com/v2/prices/{asset}-USD/spot"
-        response = requests.get(url)
-        data = response.json()
-        if 'data' in data and 'amount' in data['data']:
-            return asset, float(data['data']['amount'])
-        else:
-            return asset, None
+        async with session.get(url) as response:
+            data = await response.json()
+            if 'data' in data and 'amount' in data['data']:
+                return asset, float(data['data']['amount'])
+            else:
+                return asset, None
     except Exception as e:
+        logging.error(f"fetch_price({asset}) {e}")
         return asset, None
+
+
+# Spot prices for multiple assets
+async def get_all_prices(assets):
+    async with ClientSession() as session:
+        tasks = [get_price(asset, session) for asset in assets]
+        results = await asyncio.gather(*tasks)
+        prices = {asset: price for asset, price in results if price is not None}
+        logging.info(f"{prices}\n{len(prices)} Prices\n")
+        return prices
 
 
 ##########
@@ -64,21 +78,8 @@ log_file_path = f"/home/dev/code/tmp/{datetime.now():%Y-%m-%d %H-%M-%S}.txt"
 logging.basicConfig(filename = log_file_path, level = logging.INFO, format = '%(message)s')
 
 # Available assets and prices
-valid = dict()
-invalid = set()
 names = get_cryptos()
-
-for i in names:
-    name, price = get_price(i)
-    if price != None:
-        valid[name] = price
-    else:
-        invalid.add(name)
-
-# Only output invalid assets if there are any
-logging.info(f"{valid}\n{len(valid)} Prices\n")
-if len(invalid) > 0:
-    logging.info(f"{invalid}\n{len(invalid)} Invalid\n")
+prices = asyncio.run(get_all_prices(names))
 
 # Calculate runtime
 end_time = time.time()
