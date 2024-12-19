@@ -7,8 +7,10 @@ from binance.client import Client as bn
 import ccxt
 import asyncio
 from aiohttp import ClientSession
+import pandas as pd
 
 
+# Shared Binance and Coinbase assets
 def get_cryptos():
     # Binance
     try:
@@ -18,19 +20,21 @@ def get_cryptos():
         logging.info(f"{bn_assets}\n{len(bn_assets)} Binance\n")
     except Exception as e:
         bn_assets = set()
-        logging.info(f"Binance Assets {e}\n")   
+        logging.info(f"get_cryptos() Binance {e}\n")
+        return 1
 
     # Coinbase
     try:
         cb_api = ccxt.coinbase({'apiKey': os.getenv("COINBASE_API_KEY"), 'secret': os.getenv("COINBASE_API_SECRET")})
         all_assets = cb_api.fetch_currencies() 
-        
+
         # No asset_id means defi, delisted, mobile only, etc
         cb_assets = {asset for asset, details in all_assets.items() if 'asset_id' in details['info']}
         logging.info(f"{cb_assets}\n{len(cb_assets)} Coinbase\n")
     except Exception as e:
         cb_assets = set()
-        logging.info(f"Coinbase Assets {e}\n")
+        logging.info(f"get_cryptos() Coinbase {e}\n")
+        return 1
 
     # Common
     if bn_assets and cb_assets:
@@ -52,18 +56,67 @@ async def get_price(asset, session):
             else:
                 return asset, None
     except Exception as e:
-        logging.error(f"fetch_price({asset}) {e}")
+        logging.info(f"fetch_price({asset}) {e}\n")
         return asset, None
 
 
 # Spot prices for multiple assets
 async def get_all_prices(assets):
-    async with ClientSession() as session:
-        tasks = [get_price(asset, session) for asset in assets]
-        results = await asyncio.gather(*tasks)
-        prices = {asset: price for asset, price in results if price is not None}
-        logging.info(f"{prices}\n{len(prices)} Prices\n")
-        return prices
+    try:
+        async with ClientSession() as session:
+            tasks = {get_price(asset, session) for asset in assets}
+            results = await asyncio.gather(*tasks)
+            prices = {asset: price for asset, price in results if price is not None}
+            logging.info(f"{prices}\n{len(prices)} Prices\n")
+            return prices
+    except Exception as e:
+        logging.info(f"get_all_prices() {e}\n")
+
+
+# Candlestick data for a single asset
+async def fetch_candles(symbol, interval, session):
+    url = f"https://api.binance.us/api/v3/klines"
+    params = {
+        "symbol": symbol + "USDT",
+        "interval": interval,
+    }
+    try:
+        async with session.get(url, params = params) as response:
+            data = await response.json()
+            if response.status == 200:
+                # Convert to DataFrame
+                columns = ['Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time',
+                           'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Volume', 
+                           'Taker Buy Quote Volume', 'Ignore']
+                df = pd.DataFrame(data, columns = columns)
+
+                # Convert timestamps to readable datetime
+                df['Open Time'] = pd.to_datetime(df['Open Time'], unit = 'ms')
+                df['Close Time'] = pd.to_datetime(df['Close Time'], unit = 'ms')
+                logging.info(f"{symbol}\n{df}\n")
+                return symbol, df
+            else:
+                logging.info(f"fetch_candles({symbol}) No Candles\n")
+                return symbol, None
+    except Exception as e:
+        logging.info(f"fetch_candles({symbol} {interval}) {e}\n")
+        return symbol, None
+
+
+# Candlestick data for multiple assets
+async def fetch_all_candles(symbols, interval):
+    try:
+        async with ClientSession() as session:
+            tasks = [fetch_candles(symbol, interval, session) for symbol in symbols]
+            results = await asyncio.gather(*tasks)
+            
+            # Create a dictionary of DataFrames for each symbol
+            candles = {symbol: df for symbol, df in results if df is not None}
+            logging.info(f"{len(candles)} Dataframes\n")
+            return candles
+    except Exception as e:
+        logging.info(f"fetch_all_candles() {e}\n")
+        return 1
 
 
 ##########
@@ -77,9 +130,13 @@ start_time = time.time()
 log_file_path = f"/home/dev/code/tmp/{datetime.now():%Y-%m-%d %H-%M-%S}.txt"
 logging.basicConfig(filename = log_file_path, level = logging.INFO, format = '%(message)s')
 
-# Available assets and prices
+# Assets, candles and prices
+# Only proceed to next function if previous doesn't error out
 names = get_cryptos()
-prices = asyncio.run(get_all_prices(names))
+if names != 1:
+    candles = asyncio.run(fetch_all_candles(names, '1h'))
+if candles != 1:
+    prices = asyncio.run(get_all_prices(candles.keys()))
 
 # Calculate runtime
 end_time = time.time()
